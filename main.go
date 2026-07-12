@@ -128,15 +128,32 @@ func (c *gandiDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 			return fmt.Errorf("unable to create TXT record: %v", err)
 		}
 	} else {
-		if strings.Join(record.RrsetValues, "") != "\""+ch.Key+"\"" {
-			klog.V(6).Infof("Current record exists for %s value is %s, new value will be \"%s\"", subdomain+root, strings.Join(record.RrsetValues, ""), ch.Key)
-			_, err := gandiClient.UpdateDomainRecordByNameAndType(root, subdomain, "TXT", GandiMinTtl, []string{ch.Key})
-			if err != nil {
-				return fmt.Errorf("unable to update TXT record: %v", err)
+		// The record may already hold values for other in-flight challenges on
+		// the same FQDN (e.g. apex + wildcard of the same certificate): append
+		// the new value instead of replacing the whole rrset.
+		values := make([]string, 0, len(record.RrsetValues)+1)
+		for _, v := range record.RrsetValues {
+			if unquoteTxtValue(v) == ch.Key {
+				klog.V(6).Infof("Value \"%s\" already present for %s, nothing to do", ch.Key, subdomain+"."+root)
+				return nil
 			}
+			values = append(values, unquoteTxtValue(v))
+		}
+		values = append(values, ch.Key)
+		klog.V(6).Infof("Current record exists for %s with %d value(s), appending value \"%s\"", subdomain+"."+root, len(record.RrsetValues), ch.Key)
+		_, err := gandiClient.UpdateDomainRecordByNameAndType(root, subdomain, "TXT", GandiMinTtl, values)
+		if err != nil {
+			return fmt.Errorf("unable to update TXT record: %v", err)
 		}
 	}
 	return nil
+}
+
+// unquoteTxtValue strips the surrounding double quotes the Gandi LiveDNS API
+// adds around TXT rrset values, so values can be compared and resubmitted
+// without double quoting.
+func unquoteTxtValue(value string) string {
+	return strings.Trim(value, "\"")
 }
 
 // CleanUp should delete the relevant TXT record from the DNS provider console.
@@ -172,13 +189,31 @@ func (c *gandiDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 		return fmt.Errorf("unable to mange provided domain : %v", err)
 	}
 
-	_, err = gandiClient.GetDomainRecordByNameAndType(root, subdomain, "TXT")
+	record, err := gandiClient.GetDomainRecordByNameAndType(root, subdomain, "TXT")
 	if err != nil {
 		klog.V(6).Infof("There is no entry of TXT matching, do nothing: %v", err)
-	} else {
-		err := gandiClient.DeleteDomainRecord(root, subdomain, "TXT")
-		if err != nil {
+		return nil
+	}
+
+	// Only remove the value belonging to this challenge: the rrset may hold
+	// values for other in-flight challenges on the same FQDN (e.g. apex +
+	// wildcard of the same certificate).
+	remaining := make([]string, 0, len(record.RrsetValues))
+	for _, v := range record.RrsetValues {
+		if unquoteTxtValue(v) != ch.Key {
+			remaining = append(remaining, unquoteTxtValue(v))
+		}
+	}
+
+	if len(remaining) == 0 {
+		klog.V(6).Infof("No remaining TXT value for %s, deleting the record", subdomain+"."+root)
+		if err := gandiClient.DeleteDomainRecord(root, subdomain, "TXT"); err != nil {
 			return fmt.Errorf("unable to delete TXT record: %v", err)
+		}
+	} else if len(remaining) < len(record.RrsetValues) {
+		klog.V(6).Infof("%d TXT value(s) remaining for %s, removing only value \"%s\"", len(remaining), subdomain+"."+root, ch.Key)
+		if _, err := gandiClient.UpdateDomainRecordByNameAndType(root, subdomain, "TXT", GandiMinTtl, remaining); err != nil {
+			return fmt.Errorf("unable to update TXT record: %v", err)
 		}
 	}
 
