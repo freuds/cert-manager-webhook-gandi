@@ -2,9 +2,9 @@ GO ?= $(shell which go)
 OS ?= $(shell $(GO) env GOOS)
 ARCH ?= $(shell $(GO) env GOARCH)
 
-GO_VERSION := "1.23"
-IMAGE_NAME := "sintef/cert-manager-gandi"
-IMAGE_TAG := "0.4.0"
+GO_VERSION := $(shell $(GO) mod edit -json | sed -n 's/.*"Go": "\([0-9.]*\)".*/\1/p')
+IMAGE_NAME := "ghcr.io/freuds/cert-manager-webhook-gandi"
+IMAGE_TAG := "0.6.1"
 
 OUT := $(shell pwd)/_out
 
@@ -35,12 +35,12 @@ build:
 	docker buildx build --target=image --platform=linux/amd64 --output=type=docker,name=${IMAGE_NAME}:${IMAGE_TAG} --tag=${IMAGE_NAME}:latest --build-arg=GO_VERSION=${GO_VERSION} .
 
 package:
-	helm package deploy/cert-manager-webhook-gandi -d charts/
-	helm repo index charts/ --url https://bwolf.github.io/cert-manager-webhook-gandi
+	helm package charts/cert-manager-webhook-gandi -d charts/
+	helm repo index charts/ --url https://freuds.github.io/cert-manager-webhook-gandi
 
 .PHONY: rendered-manifest.yaml
 rendered-manifest.yaml:
 	helm template \
         --set image.repository=${IMAGE_NAME} \
         --set image.tag=${IMAGE_TAG} \
-        deploy/cert-manager-webhook-gandi > "${OUT}/rendered-manifest.yaml"
+        charts/cert-manager-webhook-gandi > "${OUT}/rendered-manifest.yaml"
